@@ -41,6 +41,7 @@ def main():
     freeze_cfg = train_cfg.get("freeze", {}) or {}
     freeze_experts = bool(freeze_cfg.get("experts", True))
     freeze_fusion = bool(freeze_cfg.get("fusion", False))
+    freeze_dcdir = bool(freeze_cfg.get("dcdir", True))
     optimizer = AdamW([], lr=lr, weight_decay=weight_decay)
 
     def train_for_device(device_id: int, subset: list, out_dir: str):
@@ -57,6 +58,7 @@ def main():
                 batch_size,
                 freeze_experts=freeze_experts,
                 freeze_fusion=freeze_fusion,
+                freeze_dcdir=freeze_dcdir,
             )
             print(f"[device {device_id}] Epoch {ep}/{epochs} metrics: {metrics}")
             if metrics["loss"] < best_loss:

@@ -173,6 +173,7 @@ def train_one_epoch(
     batch_size: int,
     freeze_experts: bool = False,
     freeze_fusion: bool = False,
+    freeze_dcdir: bool = False,
 ):
     rng = np.random.RandomState(0)
     num_classes = int(cfg.get("model", {}).get("num_classes", 3))
@@ -257,7 +258,7 @@ def train_one_epoch(
         if not freeze_experts:
             for idx, expert in enumerate(experts):
                 grad_features += expert.backward(grad_expert_logits[idx], expert_caches[idx])
-        if dcdir is not None and any(dcdir_applied):
+        if dcdir is not None and (not freeze_dcdir) and any(dcdir_applied):
             input_cfg = cfg.get("input", {}) or {}
             n_frames = int(input_cfg.get("n_frames", 10))
             grad_mel = (grad_features / float(n_frames)).astype(np.float32)
@@ -273,7 +274,7 @@ def train_one_epoch(
         if not freeze_fusion:
             params.extend(collect_params([fusion]))
             grads.extend(collect_grads([fusion]))
-        if dcdir is not None:
+        if dcdir is not None and not freeze_dcdir:
             params.extend(collect_params([dcdir]))
             grads.extend(collect_grads([dcdir]))
         optimizer.set_params(params)
