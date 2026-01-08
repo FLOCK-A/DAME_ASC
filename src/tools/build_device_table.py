@@ -75,10 +75,30 @@ def write_csv(table: Dict[str, Any], out_csv: str):
             writer.writerow(r)
 
 
+def write_device_csv(table: Dict[str, Any], out_csv: str):
+    device_totals: Dict[int, list] = {}
+    for dmap in table.values():
+        for device, (correct, total) in dmap.items():
+            row = device_totals.setdefault(device, [0, 0])
+            row[0] += correct
+            row[1] += total
+    rows = []
+    for device, (correct, total) in device_totals.items():
+        acc = correct / total if total > 0 else ""
+        rows.append({"device": device, "accuracy": acc, "correct": correct, "total": total})
+    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["device", "accuracy", "correct", "total"])
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--val_manifest", required=True)
     parser.add_argument("--out_csv", required=True)
+    parser.add_argument("--out_device_csv", required=False, help="Optional output CSV for overall per-device accuracy")
     parser.add_argument("--experts", required=False, help='JSON list of expert configs string or path to json')
     args = parser.parse_args()
 
@@ -93,6 +113,9 @@ def main():
     table = compute_table(args.val_manifest, expert_cfgs)
     write_csv(table, args.out_csv)
     print(f"Wrote per-device table to {args.out_csv}")
+    if args.out_device_csv:
+        write_device_csv(table, args.out_device_csv)
+        print(f"Wrote per-device accuracy table to {args.out_device_csv}")
 
 
 if __name__ == "__main__":

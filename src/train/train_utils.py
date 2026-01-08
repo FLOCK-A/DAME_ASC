@@ -171,11 +171,28 @@ def train_one_epoch(
     dcdir: Optional[Any],
     optimizer: AdamW,
     batch_size: int,
+    epoch: int,
     freeze_experts: bool = False,
     freeze_fusion: bool = False,
     freeze_dcdir: bool = False,
 ):
-    rng = np.random.RandomState(0)
+    def _override_dcdir_config(
+        base_cfg: Dict[str, Any],
+        *,
+        enable: Optional[bool] = None,
+        p_apply: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        new_cfg = dict(base_cfg)
+        augment_cfg = dict(base_cfg.get("augment", {}) or {})
+        dcdir_cfg = dict(augment_cfg.get("dcdir", {}) or {})
+        if enable is not None:
+            dcdir_cfg["enable"] = enable
+        if p_apply is not None:
+            dcdir_cfg["p"] = p_apply
+        augment_cfg["dcdir"] = dcdir_cfg
+        new_cfg["augment"] = augment_cfg
+        return new_cfg
+
     num_classes = int(cfg.get("model", {}).get("num_classes", 3))
     loss_cfg = cfg.get("loss", {}) or {}
     ce_cfg = loss_cfg.get("ce", {}) or {}
@@ -187,15 +204,34 @@ def train_one_epoch(
     cons_type = cons_cfg.get("type", "mse")
     gate_entropy_weight = float(reg_cfg.get("gate_entropy_weight", 0.0))
     dcdir_l2_weight = float(reg_cfg.get("dcdir_l2_weight", 0.0))
+    augment_cfg = cfg.get("augment", {}) or {}
+    dcdir_cfg = augment_cfg.get("dcdir", {}) if isinstance(augment_cfg, dict) else {}
+    view1_dcdir_p = float(cons_cfg.get("view1_dcdir_p", 0.0))
+    view2_dcdir_p = float(cons_cfg.get("view2_dcdir_p", 1.0))
+    base_dcdir_enable = bool(dcdir_cfg.get("enable", False))
+    view1_enable = base_dcdir_enable and view1_dcdir_p > 0.0
+    view1_cfg = _override_dcdir_config(cfg, enable=view1_enable, p_apply=view1_dcdir_p)
+    view2_enable = base_dcdir_enable or bool(cons_cfg.get("view2_force_dcdir", True))
+    view2_cfg = _override_dcdir_config(cfg, enable=view2_enable, p_apply=view2_dcdir_p)
+    base_seed = int(cons_cfg.get("seed", 0))
 
     total_loss = 0.0
     num_batches = 0
+    gate_stats: Dict[int, Dict[str, Any]] = {}
+    dcdir_stats: Dict[int, Dict[str, Any]] = {}
     for start in range(0, len(samples), batch_size):
         batch = samples[start:start + batch_size]
         if not batch:
             continue
         zero_grad([*experts, fusion, dcdir])
-        features, dcdir_caches, dcdir_applied = prepare_features(batch, cfg, dcdir, training=True, rng=rng)
+        view1_rng = np.random.RandomState(base_seed + num_batches)
+        features, dcdir_caches, dcdir_applied = prepare_features(
+            batch,
+            view1_cfg,
+            dcdir,
+            training=True,
+            rng=view1_rng,
+        )
         expert_logits = []
         expert_caches = []
         for expert in experts:
@@ -212,6 +248,23 @@ def train_one_epoch(
         else:
             fused_logits = expert_logits.mean(axis=0)
             fusion_caches = []
+        if fusion is not None:
+            for i, cache in enumerate(fusion_caches):
+                device = int(device_ids[i])
+                pi = np.asarray(cache["pi"], dtype=np.float32)
+                entry = gate_stats.setdefault(device, {"pi_sum": np.zeros_like(pi), "entropy_sum": 0.0, "count": 0})
+                entry["pi_sum"] += pi
+                entry["entropy_sum"] += float(-np.sum(pi * np.log(np.clip(pi, 1e-12, 1.0))))
+                entry["count"] += 1
+        if dcdir is not None:
+            for i, cache in enumerate(dcdir_caches):
+                if cache is None:
+                    continue
+                device = int(device_ids[i])
+                style = np.asarray(cache["style"], dtype=np.float32)
+                entry = dcdir_stats.setdefault(device, {"style_sum": np.zeros_like(style), "count": 0})
+                entry["style_sum"] += style
+                entry["count"] += 1
         targets = get_targets(batch, num_classes)
         ce_loss, dlogits = cross_entropy_loss(fused_logits, targets, label_smoothing=label_smoothing)
         loss = ce_loss
@@ -284,4 +337,24 @@ def train_one_epoch(
         optimizer.step(grads)
         total_loss += loss
         num_batches += 1
-    return {"loss": total_loss / max(1, num_batches)}
+    metrics: Dict[str, Any] = {"loss": total_loss / max(1, num_batches)}
+    if gate_stats:
+        gate_pi_by_device = {
+            device: (entry["pi_sum"] / float(entry["count"])).tolist() for device, entry in gate_stats.items()
+        }
+        gate_entropy_by_device = {
+            device: float(entry["entropy_sum"] / float(entry["count"])) for device, entry in gate_stats.items()
+        }
+        metrics["gate_entropy_mean"] = float(
+            np.mean(list(gate_entropy_by_device.values())) if gate_entropy_by_device else 0.0
+        )
+        metrics["gate_stats"] = {
+            "pi_by_device": gate_pi_by_device,
+            "entropy_by_device": gate_entropy_by_device,
+        }
+    if dcdir_stats:
+        dcdir_eq_by_device = {
+            device: (entry["style_sum"] / float(entry["count"])).tolist() for device, entry in dcdir_stats.items()
+        }
+        metrics["dcdir_eq"] = {"eq_by_device": dcdir_eq_by_device}
+    return metrics

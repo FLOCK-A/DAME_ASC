@@ -4,6 +4,7 @@ from typing import Dict, Any, List, Tuple
 
 import numpy as np
 
+from dame_asc.utils import map_device_index
 
 def _softmax(x: np.ndarray) -> np.ndarray:
     x = x - np.max(x)

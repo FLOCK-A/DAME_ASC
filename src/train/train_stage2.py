@@ -1,5 +1,6 @@
 """Stage-2 device-specific fine-tuning with numpy-based training loop."""
 import argparse
+import json
 import os
 from pathlib import Path
 
