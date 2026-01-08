@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -17,6 +18,25 @@ def deterministic_mel(sample: Dict[str, Any], n_frames: int, n_mels: int, seed_o
 
 def mel_to_feature(mel: np.ndarray) -> np.ndarray:
     return mel.mean(axis=0)
+
+
+def _load_mel(sample: Dict[str, Any], n_frames: int, n_mels: int) -> np.ndarray:
+    feat = sample.get("features") or sample.get("feature")
+    if feat is not None:
+        arr = np.asarray(feat, dtype=np.float32)
+        if arr.ndim == 1:
+            return arr[None, :]
+        return arr
+    path = sample.get("path")
+    if path:
+        p = Path(str(path))
+        if p.exists() and p.suffix.lower() == ".npy":
+            arr = np.load(str(p))
+            arr = np.asarray(arr, dtype=np.float32)
+            if arr.ndim == 1:
+                return arr[None, :]
+            return arr
+    return deterministic_mel(sample, n_frames=n_frames, n_mels=n_mels)
 
 
 def prepare_features(
@@ -41,12 +61,13 @@ def prepare_features(
     dcdir_caches: List[Optional[Dict[str, Any]]] = []
     applied_flags: List[bool] = []
     for sample in samples:
-        mel = deterministic_mel(sample, n_frames=n_frames, n_mels=n_mels)
+        mel = _load_mel(sample, n_frames=n_frames, n_mels=n_mels)
         cache = None
         applied = False
         if dcdir_bank is not None and dcdir_enable:
             if (not training) or (rng.rand() <= p_apply):
-                device_id = int(sample.get("device", -1) or -1)
+                device_raw = sample.get("device", -1)
+                device_id = -1 if device_raw is None else int(device_raw)
                 mel, cache = dcdir_bank.apply_to_mel(mel, device_id, return_cache=True)
                 applied = True
         features.append(mel_to_feature(mel))

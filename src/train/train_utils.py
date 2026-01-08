@@ -198,7 +198,10 @@ def train_one_epoch(
             expert_logits.append(logits)
             expert_caches.append(cache)
         expert_logits = np.stack(expert_logits, axis=0)
-        device_ids = np.array([int(s.get("device", -1) or -1) for s in batch], dtype=np.int32)
+        device_ids = np.array(
+            [-1 if s.get("device", -1) is None else int(s.get("device", -1)) for s in batch],
+            dtype=np.int32,
+        )
         if fusion is not None:
             fused_logits, fusion_caches = fusion.forward(expert_logits, device_ids)
         else:
