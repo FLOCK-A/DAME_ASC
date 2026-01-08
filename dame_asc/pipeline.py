@@ -51,7 +51,8 @@ def run_inference(cfg: Dict[str, Any], model: BaseModel) -> Dict[str, Any]:
         # If augmentation requested and we have no real features, build synthetic mel and apply
         if use_mel_eq:
             # device id fallback
-            device_id = int(s.get("device", -1) or -1)
+            device_raw = s.get("device", -1)
+            device_id = -1 if device_raw is None else int(device_raw)
             # create zero mel and apply
             mel = np.zeros((n_frames, n_mels), dtype=float)
             aug_mel = bank.apply_to_mel(mel, device_id)
