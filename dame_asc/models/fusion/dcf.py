@@ -11,6 +11,12 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
+def _softmax_rows(x: np.ndarray) -> np.ndarray:
+    x = x - np.max(x, axis=-1, keepdims=True)
+    e = np.exp(x)
+    return e / e.sum(axis=-1, keepdims=True)
+
+
 class DCFusion:
     """Device-Conditioned Fusion with trainable gating and temperature."""
 
@@ -53,7 +59,10 @@ class DCFusion:
             T = np.log1p(np.exp(t_logits)) + 1.0
         else:
             T = np.ones(len(self.expert_names), dtype=np.float32)
-        fused_logits = np.sum(pi[:, None] * (expert_logits / T[:, None]), axis=0)
+        scaled = expert_logits / T[:, None]
+        probs = _softmax_rows(scaled)
+        fused_probs = np.sum(pi[:, None] * probs, axis=0)
+        fused_logits = np.log(np.clip(fused_probs, 1e-12, 1.0))
         cache = {
             "device_index": idx,
             "embed": embed,
@@ -62,6 +71,8 @@ class DCFusion:
             "pi": pi,
             "T": T,
             "expert_logits": expert_logits,
+            "expert_probs": probs,
+            "fused_probs": fused_probs,
         }
         return fused_logits, cache
 
@@ -81,11 +92,22 @@ class DCFusion:
             pi = cache["pi"]
             T = cache["T"]
             expert_logits = cache["expert_logits"]
+            expert_probs = cache["expert_probs"]
+            fused_probs = cache["fused_probs"]
             dlog = dlogits[i]
-            d_pi = np.array([np.sum(dlog * (expert_logits[k] / T[k])) for k in range(num_experts)])
-            grad_expert_logits[:, i, :] = (pi[:, None] / T[:, None]) * dlog[None, :]
+            d_fused = dlog / np.clip(fused_probs, 1e-12, 1.0)
+            d_pi = np.array([np.sum(d_fused * expert_probs[k]) for k in range(num_experts)])
+            for k in range(num_experts):
+                d_probs = pi[k] * d_fused
+                d_z = expert_probs[k] * (d_probs - np.sum(d_probs * expert_probs[k]))
+                grad_expert_logits[k, i, :] = d_z / T[k]
             if self.use_temperature:
-                d_T = np.array([-np.sum(dlog * (pi[k] * expert_logits[k] / (T[k] ** 2))) for k in range(num_experts)])
+                d_T = np.array(
+                    [
+                        -np.sum((pi[k] * d_fused) * (expert_logits[k] / (T[k] ** 2)))
+                        for k in range(num_experts)
+                    ]
+                )
                 t_logits = cache["h"] @ self.t_w + self.t_b
                 d_t_logits = d_T * (1.0 / (1.0 + np.exp(-t_logits)))
                 self.grad_t_w += np.outer(cache["h"], d_t_logits)
@@ -159,7 +181,7 @@ class DCFusion:
         for name in self.expert_names:
             mats.append(expert_map.get(name, np.zeros_like(next(iter(expert_map.values())))))
         mats = np.vstack(mats)
-        fused_logits, _ = self._forward_single(mats, int(device_id))
-        probs = _softmax(fused_logits)
+        fused_logits, cache = self._forward_single(mats, int(device_id))
+        probs = cache["fused_probs"]
         return {"device_id": int(device_id), "probs": probs.tolist()}
 
