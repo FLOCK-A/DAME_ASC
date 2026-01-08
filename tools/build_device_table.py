@@ -25,7 +25,8 @@ def compute_table(manifest_path: str, experts: Dict[str, Dict[str, Any]]):
     table = {ename: {} for ename in experts.keys()}  # expert -> device -> (correct, total)
 
     for s in samples:
-        device = int(s.get("device", -1) or -1)
+        device_raw = s.get("device", -1)
+        device = -1 if device_raw is None else int(device_raw)
         true = s.get("scene")
         for ename in experts.keys():
             expert = build_expert(ename, experts[ename])

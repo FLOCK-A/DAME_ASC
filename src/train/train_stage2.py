@@ -50,7 +50,8 @@ def main():
     results = []
     for s in samples:
         expert_outputs = [ex.predict(s) for ex in experts]
-        device = int(s.get("device", -1) or -1)
+        device_raw = s.get("device", -1)
+        device = -1 if device_raw is None else int(device_raw)
         fused = fusion.fuse(expert_outputs, device)
         # compute ce against ground truth using fused probs
         probs = np.array(fused["probs"])
