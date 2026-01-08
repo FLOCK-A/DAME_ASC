@@ -1,16 +1,4 @@
-"""Inference script supporting TTA and per-device ckpt fallback.
-
-Behavior:
-- Load config (infer settings), load test manifest.
-- For each sample: if device>=0 and a device-specific ckpt exists -> use stage-2 (device) model; else use general stage-1 model.
-- Build experts from config.model.experts and build fusion from config.model.fusion.
-- Apply TTA by repeating predictions num_crops times and averaging probabilities.
-- Output CSV with id,path,device,pred,probs...,used_ckpt
-
-Notes/Assumptions:
-- Device ckpt lookup: if DEVICE_CKPT_DIR contains file named "device_{id}.ckpt" or folder named "device_{id}" with a file "best.ckpt", we treat that as a stage-2 ckpt. If not found, use general_ckpt.
-- For placeholder models, ckpt files are not actually loaded; we only use their presence to choose stage-2 vs stage-1 path.
-"""
+"""Inference script supporting TTA and per-device ckpt fallback."""
 import sys
 from pathlib import Path as _Path
 # ensure repo root on sys.path
@@ -20,20 +8,15 @@ if _PROJECT_ROOT not in sys.path:
 
 import argparse
 import csv
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 from pathlib import Path
 
 import numpy as np
 
 from dame_asc.config import load_config
 from dame_asc.data.loader import DataLoader
-from dame_asc.models.factory import build_expert, build_fusion
-
-
-def softmax(logits: np.ndarray) -> np.ndarray:
-    l = logits - np.max(logits, axis=-1, keepdims=True)
-    e = np.exp(l)
-    return e / e.sum(axis=-1, keepdims=True)
+from dame_asc.features import prepare_features
+from src.train.train_utils import build_modules, load_checkpoint, softmax
 
 
 def find_device_ckpt(device_ckpt_dir: str, device_id: int) -> str | None:
@@ -59,30 +42,47 @@ def find_device_ckpt(device_ckpt_dir: str, device_id: int) -> str | None:
     return None
 
 
-def get_device_id(sample: Dict[str, Any]) -> int:
-    device_raw = sample.get("device", -1)
-    return -1 if device_raw is None else int(device_raw)
-
-
-def infer_one_sample(sample: Dict[str, Any], experts, fusion, tta_cfg: Dict[str, Any]) -> Dict[str, Any]:
+def infer_one_sample(
+    sample: Dict[str, Any],
+    experts,
+    fusion,
+    dcdir,
+    cfg: Dict[str, Any],
+    tta_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
     n_crops = int(tta_cfg.get("num_crops", 1)) if tta_cfg.get("enable", False) else 1
     probs_accum = None
-    for c in range(n_crops):
-        expert_outputs = [ex.predict(sample) for ex in experts]
+    for _ in range(n_crops):
+        features, _, _ = prepare_features([sample], cfg, dcdir, training=False, rng=np.random.RandomState(0))
+        expert_logits = []
+        for expert in experts:
+            logits, _ = expert.forward(features)
+            expert_logits.append(logits[0])
+        expert_logits = np.stack(expert_logits, axis=0)[:, None, :]
         if fusion is not None:
-            fused = fusion.fuse(expert_outputs, get_device_id(sample))
-            probs = np.array(fused["probs"])
+            fused_logits, _ = fusion.forward(expert_logits, np.array([int(sample.get("device", -1) or -1)]))
+            probs = softmax(fused_logits)[0]
         else:
-            # average softmax of logits
-            mats = np.vstack([np.array(o["logits"]) for o in expert_outputs])
-            probs = softmax(mats.mean(axis=0))
+            probs = softmax(expert_logits.mean(axis=0))[0]
         if probs_accum is None:
             probs_accum = probs
         else:
             probs_accum = probs_accum + probs
     probs_final = probs_accum / float(n_crops)
     pred = int(np.argmax(probs_final))
-    return {"id": sample.get("id"), "path": sample.get("path"), "device": get_device_id(sample), "pred": pred, "probs": probs_final.tolist()}
+    return {
+        "id": sample.get("id"),
+        "path": sample.get("path"),
+        "device": int(sample.get("device", -1) or -1),
+        "pred": pred,
+        "probs": probs_final.tolist(),
+    }
+
+
+def load_model(cfg: Dict[str, Any], ckpt_path: str):
+    experts, fusion, dcdir = build_modules(cfg)
+    load_checkpoint(ckpt_path, experts, fusion, dcdir)
+    return experts, fusion, dcdir
 
 
 def main():
@@ -101,13 +101,9 @@ def main():
     loader = DataLoader(args.test_manifest)
     samples = loader.load_manifest()
 
-    # Build base experts and fusion from config
-    expert_cfgs = cfg.get("model", {}).get("experts", [{"name": "passt"}, {"name": "cnn"}])
-    fusion_cfg = cfg.get("model", {}).get("fusion", None)
-
-    # We'll build experts and fusion once and reuse; for device-specific ckpt presence we only switch which_ckpt reported
-    experts = [build_expert(e.get("name") if isinstance(e, dict) else e, e if isinstance(e, dict) else {}) for e in expert_cfgs]
-    fusion = build_fusion(fusion_cfg.get("name"), fusion_cfg) if fusion_cfg else None
+    # Load general model once
+    general_experts, general_fusion, general_dcdir = load_model(cfg, args.general_ckpt)
+    device_models: Dict[int, Tuple[Any, Any, Any]] = {}
 
     # Prepare CSV
     out_path = Path(args.out_csv)
@@ -119,12 +115,16 @@ def main():
         writer = csv.writer(csvf)
         writer.writerow(header)
         for s in samples:
-            device = get_device_id(s)
+            device = int(s.get("device", -1) or -1)
             device_ckpt = find_device_ckpt(args.device_ckpt_dir, device) if device >= 0 else None
             used_ckpt = device_ckpt if device_ckpt else args.general_ckpt
-
-            # (Placeholder) In a real system, you'd load device-specific model weights here. For now, use same experts/fusion but report used_ckpt.
-            res = infer_one_sample(s, experts, fusion, tta_cfg)
+            if device_ckpt:
+                if device not in device_models:
+                    device_models[device] = load_model(cfg, device_ckpt)
+                experts, fusion, dcdir = device_models[device]
+            else:
+                experts, fusion, dcdir = general_experts, general_fusion, general_dcdir
+            res = infer_one_sample(s, experts, fusion, dcdir, cfg, tta_cfg)
             row = [res["id"], res["path"], res["device"], used_ckpt, res["pred"]] + res["probs"]
             writer.writerow(row)
 

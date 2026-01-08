@@ -1,25 +1,45 @@
 from typing import Dict, Any
+
 import numpy as np
+
 from dame_asc.model.base import BaseModel
+from .common import NumpyMLPExpert
 
 
 class PasstExpert(BaseModel):
-    """Placeholder Passt expert that returns logits over classes.
-
-    Deterministic per-sample logits generated from sample id and seed.
-    """
+    """Lightweight PaSST-style expert using a numpy MLP."""
 
     def __init__(self, config: Dict[str, Any] | None = None):
         super().__init__(config)
-        self.num_classes = int(self.config.get("num_classes", 3))
+        cfg = self.config.copy()
+        cfg.setdefault("hidden_dims", [512, 256])
+        self.model = NumpyMLPExpert("passt", cfg)
         self.name = "passt"
 
+    def forward(self, features: np.ndarray):
+        return self.model.forward(features)
+
+    def backward(self, dlogits: np.ndarray, cache):
+        return self.model.backward(dlogits, cache)
+
+    def zero_grad(self):
+        self.model.zero_grad()
+
+    def parameters(self):
+        return self.model.parameters()
+
+    def gradients(self):
+        return self.model.gradients()
+
+    def state_dict(self):
+        return self.model.state_dict()
+
+    def load_state_dict(self, state):
+        self.model.load_state_dict(state)
+
     def predict(self, sample: Dict[str, Any]) -> Dict[str, Any]:
-        # derive deterministic logits from sample identifier
-        sid = sample.get("id")
-        if sid is None:
-            sid = sample.get("path") or "0"
-        seed = abs(hash(str(sid) + self.name)) % (2 ** 32)
-        rng = np.random.RandomState(seed)
-        logits = rng.randn(self.num_classes).astype(float)
-        return {"id": sid, "logits": logits.tolist(), "expert": self.name}
+        features = sample.get("features")
+        if features is None:
+            raise ValueError("features missing in sample for PasstExpert.predict")
+        logits, _ = self.forward(np.asarray(features)[None, :])
+        return {"id": sample.get("id"), "logits": logits[0].tolist(), "expert": self.name}
