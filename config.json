@@ -1,0 +1,16 @@
+{
+  "model": {"backend": "placeholder", "labels": ["scene_a", "scene_b", "scene_c"], "seed": 123},
+  "inference": {"synthetic_count": 5, "output": "inference_results.json"},
+  "dataset": {"manifest": "data/manifests/train.json", "manifest_format": "dict"},
+  "augment": {
+    "dcdir": {
+      "enable": true,
+      "mode": "mel_eq_bank",
+      "p": 0.7,
+      "bank_size": 16,
+      "max_db": 6.0,
+      "smooth_kernel": 9
+    }
+  }
+}
+

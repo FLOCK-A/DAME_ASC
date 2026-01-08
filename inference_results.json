@@ -1,0 +1,30 @@
+{
+  "n_samples": 5,
+  "predictions": [
+    {
+      "id": "synth_0",
+      "pred": "scene_a",
+      "score": 0.2676771662174662
+    },
+    {
+      "id": "synth_1",
+      "pred": "scene_b",
+      "score": 0.26655381253138355
+    },
+    {
+      "id": "synth_2",
+      "pred": "scene_a",
+      "score": 0.3791243324890884
+    },
+    {
+      "id": "synth_3",
+      "pred": "scene_c",
+      "score": 0.33219769850967984
+    },
+    {
+      "id": "synth_4",
+      "pred": "scene_a",
+      "score": 0.1596623967219699
+    }
+  ]
+}

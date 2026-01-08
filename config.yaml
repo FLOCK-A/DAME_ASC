@@ -1,0 +1,9 @@
+# Example configuration for DAME-ASC (placeholder)
+model:
+  backend: placeholder
+  labels: [scene_a, scene_b, scene_c]
+  seed: 123
+inference:
+  synthetic_count: 5
+  output: inference_results.json
+
