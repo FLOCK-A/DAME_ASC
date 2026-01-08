@@ -19,6 +19,7 @@ from typing import Dict, Any
 from pathlib import Path
 
 from dame_asc.data.loader import DataLoader
+from dame_asc.features import prepare_features
 from dame_asc.models.factory import build_expert
 
 
@@ -31,17 +32,28 @@ def compute_table(manifest_path: str, expert_cfgs: list):
     samples = loader.load_manifest()
     expert_names = [e.get("name") if isinstance(e, dict) else e for e in expert_cfgs]
     table = {ename: {} for ename in expert_names}
+    input_dim = 128
+    for e in expert_cfgs:
+        if isinstance(e, dict) and "input_dim" in e:
+            input_dim = int(e["input_dim"])
+            break
+    cfg = {"input": {"n_mels": input_dim, "n_frames": 10}, "augment": {}}
+    experts = []
+    for e in expert_cfgs:
+        name = e.get("name") if isinstance(e, dict) else e
+        e_cfg = dict(e) if isinstance(e, dict) else {}
+        e_cfg.setdefault("input_dim", input_dim)
+        experts.append(build_expert(name, e_cfg))
 
-    for s in samples:
+    features, _, _ = prepare_features(samples, cfg, dcdir_bank=None, training=False)
+    for idx, s in enumerate(samples):
         device_raw = s.get("device", -1)
         device = -1 if device_raw is None else int(device_raw)
         true = s.get("scene")
-        for e in expert_cfgs:
-            name = e.get("name") if isinstance(e, dict) else e
-            expert = build_expert(name, e if isinstance(e, dict) else {})
-            out = expert.predict(s)
-            pred = argmax_idx(out["logits"])
-            row = table[name].setdefault(device, [0, 0])
+        for expert in experts:
+            logits, _ = expert.forward(features[idx:idx + 1])
+            pred = argmax_idx(logits[0])
+            row = table[expert.name].setdefault(device, [0, 0])
             if true is not None and pred == int(true):
                 row[0] += 1
             row[1] += 1

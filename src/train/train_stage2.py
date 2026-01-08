@@ -66,11 +66,21 @@ def main():
 
     Path(workdir).mkdir(parents=True, exist_ok=True)
     if args.all_devices:
-        device_ids = sorted({int(s.get("device", -1) or -1) for s in samples if int(s.get("device", -1) or -1) >= 0})
+        device_ids = sorted(
+            {
+                (-1 if s.get("device", -1) is None else int(s.get("device", -1)))
+                for s in samples
+                if (-1 if s.get("device", -1) is None else int(s.get("device", -1))) >= 0
+            }
+        )
         for device_id in device_ids:
             if args.init_ckpt:
                 load_checkpoint(args.init_ckpt, experts, fusion, dcdir)
-            subset = [s for s in samples if int(s.get("device", -1) or -1) == device_id]
+            subset = [
+                s
+                for s in samples
+                if (-1 if s.get("device", -1) is None else int(s.get("device", -1))) == device_id
+            ]
             if not subset:
                 continue
             device_dir = os.path.join(workdir, f"device_{device_id}")
@@ -79,7 +89,11 @@ def main():
     else:
         device_id = int(args.device_id) if args.device_id is not None else -1
         if device_id >= 0:
-            subset = [s for s in samples if int(s.get("device", -1) or -1) == device_id]
+            subset = [
+                s
+                for s in samples
+                if (-1 if s.get("device", -1) is None else int(s.get("device", -1))) == device_id
+            ]
         else:
             subset = samples
         train_for_device(device_id, subset, workdir)
