@@ -62,7 +62,7 @@ class NumpyMLPExpert:
 
     def backward(self, dlogits: np.ndarray, cache: ExpertCache) -> np.ndarray:
         grad = dlogits
-        for idx in reversed(range(len(self.weights))):
+        for idx in range(len(self.weights) - 1, -1, -1):
             a_prev = cache.activations[idx]
             self.grads_w[idx] = a_prev.T @ grad / float(a_prev.shape[0])
             self.grads_b[idx] = grad.mean(axis=0)
