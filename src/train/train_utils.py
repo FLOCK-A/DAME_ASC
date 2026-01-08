@@ -248,8 +248,11 @@ def train_one_epoch(
                 pi = cache["pi"]
                 entropies.append(-np.sum(pi * np.log(np.clip(pi, 1e-12, 1.0))))
             loss += gate_entropy_weight * float(np.mean(entropies))
+            fusion.add_gate_entropy_grad(fusion_caches, gate_entropy_weight / float(len(fusion_caches)))
         if dcdir is not None and dcdir_l2_weight > 0.0:
             loss += dcdir_l2_weight * float(np.mean(dcdir.prototypes ** 2))
+            numel = float(dcdir.prototypes.size)
+            dcdir.grad_prototypes += (2.0 * dcdir_l2_weight / max(1.0, numel)) * dcdir.prototypes
         if fusion is not None:
             grad_expert_logits = fusion.backward(dlogits, fusion_caches)
         else:

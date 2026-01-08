@@ -27,6 +27,7 @@ class DCFusion:
         self.use_temperature = bool(config.get("use_temperature", False))
         self.expert_names = config.get("expert_names", ["passt", "cnn"])
         self.num_devices = int(config.get("num_devices", 16))
+        self.unknown_index = int(config.get("unknown_index", max(0, self.num_devices - 1)))
         seed = int(config.get("seed", 0))
         rng = np.random.RandomState(seed)
         self.device_embeddings = rng.randn(self.num_devices, self.embed_dim).astype(np.float32) / np.sqrt(self.embed_dim)
@@ -46,7 +47,11 @@ class DCFusion:
         self.grad_t_b = np.zeros_like(self.t_b) if self.use_temperature else None
 
     def _device_index(self, device_id: int) -> int:
-        return int(device_id) % self.num_devices
+        if device_id is None or int(device_id) < 0:
+            return self.unknown_index
+        if int(device_id) >= self.num_devices:
+            return self.unknown_index
+        return int(device_id)
 
     def _forward_single(self, expert_logits: np.ndarray, device_id: int) -> Tuple[np.ndarray, Dict[str, Any]]:
         idx = self._device_index(device_id)
@@ -147,6 +152,21 @@ class DCFusion:
         if self.use_temperature:
             grads.extend([self.grad_t_w, self.grad_t_b])
         return grads
+
+    def add_gate_entropy_grad(self, caches: List[Dict[str, Any]], weight: float):
+        if weight == 0.0:
+            return
+        for cache in caches:
+            pi = cache["pi"]
+            d_pi = -(np.log(np.clip(pi, 1e-12, 1.0)) + 1.0)
+            d_gate_logits = pi * (d_pi - np.sum(d_pi * pi))
+            self.grad_g_w2 += weight * np.outer(cache["h"], d_gate_logits)
+            self.grad_g_b2 += weight * d_gate_logits
+            d_h = self.g_w2 @ d_gate_logits
+            d_h = d_h * (1.0 - cache["h"] ** 2)
+            self.grad_g_w1 += weight * np.outer(cache["embed"], d_h)
+            self.grad_g_b1 += weight * d_h
+            self.grad_device_embeddings[cache["device_index"]] += weight * (self.g_w1 @ d_h)
 
     def state_dict(self) -> Dict[str, np.ndarray]:
         state = {

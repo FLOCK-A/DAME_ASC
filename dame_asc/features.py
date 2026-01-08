@@ -54,6 +54,9 @@ def prepare_features(
     dcdir_enable = bool(dcdir_cfg.get("enable", False))
     p_apply = float(dcdir_cfg.get("p", 1.0))
     apply_in_infer = bool(dcdir_cfg.get("apply_in_infer", False))
+    tta_cfg = cfg.get("infer", {}).get("tta", {}) or {}
+    tta_enable = bool(tta_cfg.get("enable", False))
+    tta_time_shift = bool(tta_cfg.get("time_shift", False))
 
     if rng is None:
         rng = np.random.RandomState(0)
@@ -71,6 +74,10 @@ def prepare_features(
                 device_id = -1 if device_raw is None else int(device_raw)
                 mel, cache = dcdir_bank.apply_to_mel(mel, device_id, return_cache=True)
                 applied = True
+        if (not training) and tta_enable and tta_time_shift:
+            if mel.ndim == 2 and mel.shape[0] > 1:
+                shift = int(rng.randint(0, mel.shape[0]))
+                mel = np.roll(mel, shift, axis=0)
         features.append(mel_to_feature(mel))
         dcdir_caches.append(cache)
         applied_flags.append(applied)
