@@ -1,11 +1,12 @@
 import json
 import logging
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 import numpy as np
-from pathlib import Path
 
-from .augment.dcdir_bank import MelEQBank
+if TYPE_CHECKING:
+    from .augment.dcdir_bank import MelEQBank
 
 
 def get_logger(name: str):
@@ -24,10 +25,19 @@ def write_json(path: str, obj: Any):
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
+def map_device_index(device_id: int | None, num_devices: int, unknown_index: int) -> int:
+    if device_id is None:
+        return int(unknown_index)
+    device_int = int(device_id)
+    if device_int < 0 or device_int >= int(num_devices):
+        return int(unknown_index)
+    return device_int
+
+
 def load_feature(
     sample: Dict[str, Any],
     input_cfg: Optional[Dict[str, Any]] = None,
-    dcdir_bank: Optional[MelEQBank] = None,
+    dcdir_bank: Optional["MelEQBank"] = None,
 ) -> np.ndarray:
     """Load or synthesize feature vector for a sample.
 
