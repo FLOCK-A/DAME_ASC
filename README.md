@@ -542,3 +542,179 @@ MVP：2 experts（PaSST + CNN） + DCDIR(mel_eq_bank) + DCF（无 temperature）
 ---
 
 如果你希望我继续把这一版 README 对应的**“详细流程图（包含损失与 Stage-1/Stage-2 训练步骤）”**也生成成最终版本，我可以按这份 README 的结构重新画一张流程图（把 DCF、DCDIR、consistency、entropy reg、stage2 fusion_only 全部标进去），并给你一份可直接放进论文/报告的图注。
+
+---
+
+# 给新手（傻瓜式）说明
+
+下面用最简单的方式说清楚：每个主要文件是干什么的、需要什么输入、怎么跑。
+
+## 1) 这个仓库主要文件做什么
+
+**训练/推理入口（脚本）**
+
+* `src/train/train_stage1.py`：第一阶段训练（通用模型）。
+* `src/train/train_stage2.py`：第二阶段训练（按设备微调）。
+* `src/infer/infer.py`：推理（有设备 ckpt 就用，没有就回退通用 ckpt）。
+* `src/tools/build_device_table.py`：统计“每个设备上每个 expert 的准确率”表。
+
+**核心模块（库代码）**
+
+* `dame_asc/models/experts/`：各个 expert（这里是 numpy MLP 原型，不是 PyTorch）。
+* `dame_asc/models/fusion/dcf.py`：DCF 融合（device-conditioned gating）。
+* `dame_asc/augment/dcdir_bank.py`：DCDIR（device-conditioned mel EQ bank）。
+* `dame_asc/features.py`：把输入样本转成特征（支持 `.npy` 或 sample 自带 features）。
+* `dame_asc/data/loader.py`：读取 manifest.json 的样本列表。
+* `dame_asc/config.py`：加载配置文件（yaml/json）。
+
+---
+
+## 2) 你需要准备什么输入
+
+**最重要：准备 `.npy` 特征文件（推荐 log-mel）**
+
+每个样本都需要一个 `.npy` 文件，形状建议是 `[T, F]`（时间 * 频率），例如 `[100, 128]`。
+
+manifest 示例：
+
+```json
+[
+  {"path": "data/features/a.npy", "scene": 3, "device": 1},
+  {"path": "data/features/b.npy", "scene": 7, "device": 0}
+]
+```
+
+字段说明：
+
+* `path`: 指向 `.npy` 文件
+* `scene`: 类别 id（0..C-1）
+* `device`: 设备 id（0..D-1），unknown 用 `-1`
+
+**注意**
+
+* 如果你不给 `.npy`，系统会退回到“伪随机特征”，训练没有意义。
+* 所以真正训练时，请确保 manifest 里每条都有 `.npy`。
+
+---
+
+## 3) 最简单的运行命令（可直接复制）
+
+### 3.1 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3.2 Stage-1 训练（通用）
+
+```bash
+python src/train/train_stage1.py \
+  --config config.json \
+  --train_manifest data/manifests/train.json \
+  --workdir runs/stage1_general \
+  --epochs 1
+```
+
+输出：
+
+* `runs/stage1_general/best.ckpt`
+
+### 3.3 Stage-2 训练（按设备微调）
+
+```bash
+python src/train/train_stage2.py \
+  --config config.json \
+  --train_manifest data/manifests/train.json \
+  --init_ckpt runs/stage1_general/best.ckpt \
+  --all_devices \
+  --workdir runs/stage2_all
+```
+
+输出：
+
+* `runs/stage2_all/device_*/best.ckpt`
+
+### 3.4 推理（有 device ckpt 就用，没有就回退 general）
+
+```bash
+python src/infer/infer.py \
+  --config config.json \
+  --test_manifest data/manifests/test.json \
+  --general_ckpt runs/stage1_general/best.ckpt \
+  --device_ckpt_dir runs/stage2_all \
+  --out_csv runs/preds.csv
+```
+
+输出：
+
+* `runs/preds.csv`
+
+### 3.5 统计每设备每 expert 表
+
+```bash
+python src/tools/build_device_table.py \
+  --val_manifest data/manifests/val.json \
+  --out_csv runs/per_device_table.csv
+```
+
+输出：
+
+* `runs/per_device_table.csv`
+
+---
+
+## 4) 配置文件最小示例（config.json）
+
+```json
+{
+  "input": {
+    "n_mels": 128,
+    "n_frames": 100
+  },
+  "model": {
+    "num_classes": 10,
+    "experts": [{"name": "passt"}, {"name": "cnn"}],
+    "fusion": {"name": "dcf", "num_devices": 16, "embed_dim": 32, "hidden": 64}
+  },
+  "augment": {
+    "dcdir": {
+      "enable": true,
+      "mode": "mel_eq_bank",
+      "p": 0.7,
+      "bank_size": 16,
+      "max_db": 6.0,
+      "smooth_kernel": 9,
+      "num_devices": 16
+    }
+  },
+  "loss": {
+    "ce": {"label_smoothing": 0.05},
+    "consistency": {"enable": true, "weight": 0.5, "type": "mse"}
+  },
+  "train": {
+    "epochs": 10,
+    "batch_size": 32,
+    "lr": 1e-3,
+    "freeze": {"experts": false, "fusion": false, "dcdir": false}
+  },
+  "infer": {
+    "tta": {"enable": true, "num_crops": 5, "time_shift": true}
+  }
+}
+```
+
+---
+
+## 5) 常见问题（傻瓜提示）
+
+**Q: 为什么训练出来很差？**
+
+A: 你没有给真实 `.npy` 特征（系统用了伪随机特征）。
+
+**Q: `device=-1` 会怎样？**
+
+A: 会走 unknown device 分支（不会折叠到真实设备）。
+
+**Q: 这是 PyTorch 吗？**
+
+A: 不是。当前是 numpy 手写反传原型，适合验证机制，不是冲榜版。

@@ -46,6 +46,7 @@ def main():
     freeze_cfg = train_cfg.get("freeze", {}) or {}
     freeze_experts = bool(freeze_cfg.get("experts", False))
     freeze_fusion = bool(freeze_cfg.get("fusion", False))
+    freeze_dcdir = bool(freeze_cfg.get("dcdir", False))
     optimizer = AdamW([], lr=lr, weight_decay=weight_decay)
 
     best_loss = float("inf")
@@ -60,6 +61,7 @@ def main():
             batch_size,
             freeze_experts=freeze_experts,
             freeze_fusion=freeze_fusion,
+            freeze_dcdir=freeze_dcdir,
         )
         print(f"Epoch {ep}/{epochs} metrics: {metrics}")
         if metrics["loss"] < best_loss:

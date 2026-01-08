@@ -66,8 +66,9 @@ class NumpyMLPExpert:
             a_prev = cache.activations[idx]
             self.grads_w[idx] = a_prev.T @ grad / float(a_prev.shape[0])
             self.grads_b[idx] = grad.mean(axis=0)
+            grad = grad @ self.weights[idx].T
             if idx > 0:
-                grad = (grad @ self.weights[idx].T) * relu_grad(cache.preacts[idx - 1])
+                grad = grad * relu_grad(cache.preacts[idx - 1])
         return grad
 
     def zero_grad(self):
@@ -95,4 +96,3 @@ class NumpyMLPExpert:
         for idx in range(len(self.weights)):
             self.weights[idx][...] = state[f"w{idx}"]
             self.biases[idx][...] = state[f"b{idx}"]
-

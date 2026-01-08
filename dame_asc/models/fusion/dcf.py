@@ -11,6 +11,12 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
+def _softmax_rows(x: np.ndarray) -> np.ndarray:
+    x = x - np.max(x, axis=-1, keepdims=True)
+    e = np.exp(x)
+    return e / e.sum(axis=-1, keepdims=True)
+
+
 class DCFusion:
     """Device-Conditioned Fusion with trainable gating and temperature."""
 
@@ -21,6 +27,7 @@ class DCFusion:
         self.use_temperature = bool(config.get("use_temperature", False))
         self.expert_names = config.get("expert_names", ["passt", "cnn"])
         self.num_devices = int(config.get("num_devices", 16))
+        self.unknown_index = int(config.get("unknown_index", max(0, self.num_devices - 1)))
         seed = int(config.get("seed", 0))
         rng = np.random.RandomState(seed)
         self.device_embeddings = rng.randn(self.num_devices, self.embed_dim).astype(np.float32) / np.sqrt(self.embed_dim)
@@ -40,7 +47,11 @@ class DCFusion:
         self.grad_t_b = np.zeros_like(self.t_b) if self.use_temperature else None
 
     def _device_index(self, device_id: int) -> int:
-        return int(device_id) % self.num_devices
+        if device_id is None or int(device_id) < 0:
+            return self.unknown_index
+        if int(device_id) >= self.num_devices:
+            return self.unknown_index
+        return int(device_id)
 
     def _forward_single(self, expert_logits: np.ndarray, device_id: int) -> Tuple[np.ndarray, Dict[str, Any]]:
         idx = self._device_index(device_id)
@@ -53,7 +64,10 @@ class DCFusion:
             T = np.log1p(np.exp(t_logits)) + 1.0
         else:
             T = np.ones(len(self.expert_names), dtype=np.float32)
-        fused_logits = np.sum(pi[:, None] * (expert_logits / T[:, None]), axis=0)
+        scaled = expert_logits / T[:, None]
+        probs = _softmax_rows(scaled)
+        fused_probs = np.sum(pi[:, None] * probs, axis=0)
+        fused_logits = np.log(np.clip(fused_probs, 1e-12, 1.0))
         cache = {
             "device_index": idx,
             "embed": embed,
@@ -62,6 +76,8 @@ class DCFusion:
             "pi": pi,
             "T": T,
             "expert_logits": expert_logits,
+            "expert_probs": probs,
+            "fused_probs": fused_probs,
         }
         return fused_logits, cache
 
@@ -81,11 +97,22 @@ class DCFusion:
             pi = cache["pi"]
             T = cache["T"]
             expert_logits = cache["expert_logits"]
+            expert_probs = cache["expert_probs"]
+            fused_probs = cache["fused_probs"]
             dlog = dlogits[i]
-            d_pi = np.array([np.sum(dlog * (expert_logits[k] / T[k])) for k in range(num_experts)])
-            grad_expert_logits[:, i, :] = (pi[:, None] / T[:, None]) * dlog[None, :]
+            d_fused = dlog / np.clip(fused_probs, 1e-12, 1.0)
+            d_pi = np.array([np.sum(d_fused * expert_probs[k]) for k in range(num_experts)])
+            for k in range(num_experts):
+                d_probs = pi[k] * d_fused
+                d_z = expert_probs[k] * (d_probs - np.sum(d_probs * expert_probs[k]))
+                grad_expert_logits[k, i, :] = d_z / T[k]
             if self.use_temperature:
-                d_T = np.array([-np.sum(dlog * (pi[k] * expert_logits[k] / (T[k] ** 2))) for k in range(num_experts)])
+                d_T = np.array(
+                    [
+                        -np.sum((pi[k] * d_fused) * (expert_logits[k] / (T[k] ** 2)))
+                        for k in range(num_experts)
+                    ]
+                )
                 t_logits = cache["h"] @ self.t_w + self.t_b
                 d_t_logits = d_T * (1.0 / (1.0 + np.exp(-t_logits)))
                 self.grad_t_w += np.outer(cache["h"], d_t_logits)
@@ -126,6 +153,21 @@ class DCFusion:
             grads.extend([self.grad_t_w, self.grad_t_b])
         return grads
 
+    def add_gate_entropy_grad(self, caches: List[Dict[str, Any]], weight: float):
+        if weight == 0.0:
+            return
+        for cache in caches:
+            pi = cache["pi"]
+            d_pi = -(np.log(np.clip(pi, 1e-12, 1.0)) + 1.0)
+            d_gate_logits = pi * (d_pi - np.sum(d_pi * pi))
+            self.grad_g_w2 += weight * np.outer(cache["h"], d_gate_logits)
+            self.grad_g_b2 += weight * d_gate_logits
+            d_h = self.g_w2 @ d_gate_logits
+            d_h = d_h * (1.0 - cache["h"] ** 2)
+            self.grad_g_w1 += weight * np.outer(cache["embed"], d_h)
+            self.grad_g_b1 += weight * d_h
+            self.grad_device_embeddings[cache["device_index"]] += weight * (self.g_w1 @ d_h)
+
     def state_dict(self) -> Dict[str, np.ndarray]:
         state = {
             "device_embeddings": self.device_embeddings,
@@ -159,7 +201,7 @@ class DCFusion:
         for name in self.expert_names:
             mats.append(expert_map.get(name, np.zeros_like(next(iter(expert_map.values())))))
         mats = np.vstack(mats)
-        fused_logits, _ = self._forward_single(mats, int(device_id))
-        probs = _softmax(fused_logits)
+        fused_logits, cache = self._forward_single(mats, int(device_id))
+        probs = cache["fused_probs"]
         return {"device_id": int(device_id), "probs": probs.tolist()}
 
