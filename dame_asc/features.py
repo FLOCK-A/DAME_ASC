@@ -53,6 +53,7 @@ def prepare_features(
     dcdir_cfg = augment_cfg.get("dcdir", {}) if isinstance(augment_cfg, dict) else {}
     dcdir_enable = bool(dcdir_cfg.get("enable", False))
     p_apply = float(dcdir_cfg.get("p", 1.0))
+    apply_in_infer = bool(dcdir_cfg.get("apply_in_infer", False))
 
     if rng is None:
         rng = np.random.RandomState(0)
@@ -65,7 +66,7 @@ def prepare_features(
         cache = None
         applied = False
         if dcdir_bank is not None and dcdir_enable:
-            if (not training) or (rng.rand() <= p_apply):
+            if (training and rng.rand() <= p_apply) or (apply_in_infer and rng.rand() <= p_apply):
                 device_raw = sample.get("device", -1)
                 device_id = -1 if device_raw is None else int(device_raw)
                 mel, cache = dcdir_bank.apply_to_mel(mel, device_id, return_cache=True)
