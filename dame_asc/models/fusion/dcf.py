@@ -1,77 +1,165 @@
-from typing import Dict, Any, List
+from __future__ import annotations
+
+from typing import Dict, Any, List, Tuple
+
 import numpy as np
 
 
-class DCFusion:
-    """Device-Conditioned Fusion (placeholder simple implementation).
+def _softmax(x: np.ndarray) -> np.ndarray:
+    x = x - np.max(x)
+    e = np.exp(x)
+    return e / e.sum()
 
-    This placeholder uses a device embedding (device_id -> vector), a small MLP
-    to compute gating logits over experts and an optional temperature per expert.
-    It accepts expert outputs which are dicts: {"id":..., "logits": [...], "expert": name}
-    and returns fused probabilities over classes.
-    """
+
+class DCFusion:
+    """Device-Conditioned Fusion with trainable gating and temperature."""
 
     def __init__(self, config: Dict[str, Any] | None = None):
         config = config or {}
         self.embed_dim = int(config.get("embed_dim", 32))
         self.hidden = int(config.get("hidden", 64))
         self.use_temperature = bool(config.get("use_temperature", False))
-        self.expert_names = config.get("expert_names", ["passt", "cnn"])  # default
-        # random but deterministic parameters
-        rng = np.random.RandomState(0)
-        self.device_embeddings = rng.randn(256, self.embed_dim)  # support device ids up to 255
-        self.g_w1 = rng.randn(self.embed_dim, self.hidden)
-        self.g_b1 = rng.randn(self.hidden)
-        self.g_w2 = rng.randn(self.hidden, len(self.expert_names))
-        self.g_b2 = rng.randn(len(self.expert_names))
+        self.expert_names = config.get("expert_names", ["passt", "cnn"])
+        self.num_devices = int(config.get("num_devices", 16))
+        seed = int(config.get("seed", 0))
+        rng = np.random.RandomState(seed)
+        self.device_embeddings = rng.randn(self.num_devices, self.embed_dim).astype(np.float32) / np.sqrt(self.embed_dim)
+        self.g_w1 = rng.randn(self.embed_dim, self.hidden).astype(np.float32) / np.sqrt(self.embed_dim)
+        self.g_b1 = np.zeros(self.hidden, dtype=np.float32)
+        self.g_w2 = rng.randn(self.hidden, len(self.expert_names)).astype(np.float32) / np.sqrt(self.hidden)
+        self.g_b2 = np.zeros(len(self.expert_names), dtype=np.float32)
         if self.use_temperature:
-            self.t_w = rng.randn(self.hidden, len(self.expert_names))
-            self.t_b = rng.randn(len(self.expert_names))
+            self.t_w = rng.randn(self.hidden, len(self.expert_names)).astype(np.float32) / np.sqrt(self.hidden)
+            self.t_b = np.zeros(len(self.expert_names), dtype=np.float32)
+        self.grad_device_embeddings = np.zeros_like(self.device_embeddings)
+        self.grad_g_w1 = np.zeros_like(self.g_w1)
+        self.grad_g_b1 = np.zeros_like(self.g_b1)
+        self.grad_g_w2 = np.zeros_like(self.g_w2)
+        self.grad_g_b2 = np.zeros_like(self.g_b2)
+        self.grad_t_w = np.zeros_like(self.t_w) if self.use_temperature else None
+        self.grad_t_b = np.zeros_like(self.t_b) if self.use_temperature else None
 
-    def _device_embed(self, device_id: int) -> np.ndarray:
-        di = int(device_id) % len(self.device_embeddings)
-        return self.device_embeddings[di]
+    def _device_index(self, device_id: int) -> int:
+        return int(device_id) % self.num_devices
 
-    def _mlp_gating(self, embed: np.ndarray) -> np.ndarray:
-        h = embed.dot(self.g_w1) + self.g_b1
-        h = np.tanh(h)
-        logits = h.dot(self.g_w2) + self.g_b2
-        exps = np.exp(logits - logits.max())
-        return exps / exps.sum()
+    def _forward_single(self, expert_logits: np.ndarray, device_id: int) -> Tuple[np.ndarray, Dict[str, Any]]:
+        idx = self._device_index(device_id)
+        embed = self.device_embeddings[idx]
+        h = np.tanh(embed @ self.g_w1 + self.g_b1)
+        gate_logits = h @ self.g_w2 + self.g_b2
+        pi = _softmax(gate_logits)
+        if self.use_temperature:
+            t_logits = h @ self.t_w + self.t_b
+            T = np.log1p(np.exp(t_logits)) + 1.0
+        else:
+            T = np.ones(len(self.expert_names), dtype=np.float32)
+        fused_logits = np.sum(pi[:, None] * (expert_logits / T[:, None]), axis=0)
+        cache = {
+            "device_index": idx,
+            "embed": embed,
+            "h": h,
+            "gate_logits": gate_logits,
+            "pi": pi,
+            "T": T,
+            "expert_logits": expert_logits,
+        }
+        return fused_logits, cache
 
-    def _mlp_temperature(self, embed: np.ndarray) -> np.ndarray:
-        h = embed.dot(self.g_w1) + self.g_b1
-        h = np.tanh(h)
-        t = h.dot(self.t_w) + self.t_b
-        # softplus + 1
-        return np.log1p(np.exp(t)) + 1.0
+    def forward(self, expert_logits: np.ndarray, device_ids: np.ndarray) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+        fused = []
+        caches = []
+        for i in range(expert_logits.shape[1]):
+            f, cache = self._forward_single(expert_logits[:, i, :], int(device_ids[i]))
+            fused.append(f)
+            caches.append(cache)
+        return np.vstack(fused), caches
+
+    def backward(self, dlogits: np.ndarray, caches: List[Dict[str, Any]]) -> np.ndarray:
+        num_experts = len(self.expert_names)
+        grad_expert_logits = np.zeros((num_experts, dlogits.shape[0], dlogits.shape[1]), dtype=np.float32)
+        for i, cache in enumerate(caches):
+            pi = cache["pi"]
+            T = cache["T"]
+            expert_logits = cache["expert_logits"]
+            dlog = dlogits[i]
+            d_pi = np.array([np.sum(dlog * (expert_logits[k] / T[k])) for k in range(num_experts)])
+            grad_expert_logits[:, i, :] = (pi[:, None] / T[:, None]) * dlog[None, :]
+            if self.use_temperature:
+                d_T = np.array([-np.sum(dlog * (pi[k] * expert_logits[k] / (T[k] ** 2))) for k in range(num_experts)])
+                t_logits = cache["h"] @ self.t_w + self.t_b
+                d_t_logits = d_T * (1.0 / (1.0 + np.exp(-t_logits)))
+                self.grad_t_w += np.outer(cache["h"], d_t_logits)
+                self.grad_t_b += d_t_logits
+                d_h_temp = self.t_w @ d_t_logits
+            else:
+                d_h_temp = 0.0
+            pi_vec = pi
+            d_gate_logits = pi_vec * (d_pi - np.sum(d_pi * pi_vec))
+            self.grad_g_w2 += np.outer(cache["h"], d_gate_logits)
+            self.grad_g_b2 += d_gate_logits
+            d_h = self.g_w2 @ d_gate_logits + d_h_temp
+            d_h = d_h * (1.0 - cache["h"] ** 2)
+            self.grad_g_w1 += np.outer(cache["embed"], d_h)
+            self.grad_g_b1 += d_h
+            self.grad_device_embeddings[cache["device_index"]] += self.g_w1 @ d_h
+        return grad_expert_logits
+
+    def zero_grad(self):
+        self.grad_device_embeddings.fill(0.0)
+        self.grad_g_w1.fill(0.0)
+        self.grad_g_b1.fill(0.0)
+        self.grad_g_w2.fill(0.0)
+        self.grad_g_b2.fill(0.0)
+        if self.use_temperature:
+            self.grad_t_w.fill(0.0)
+            self.grad_t_b.fill(0.0)
+
+    def parameters(self) -> List[np.ndarray]:
+        params = [self.device_embeddings, self.g_w1, self.g_b1, self.g_w2, self.g_b2]
+        if self.use_temperature:
+            params.extend([self.t_w, self.t_b])
+        return params
+
+    def gradients(self) -> List[np.ndarray]:
+        grads = [self.grad_device_embeddings, self.grad_g_w1, self.grad_g_b1, self.grad_g_w2, self.grad_g_b2]
+        if self.use_temperature:
+            grads.extend([self.grad_t_w, self.grad_t_b])
+        return grads
+
+    def state_dict(self) -> Dict[str, np.ndarray]:
+        state = {
+            "device_embeddings": self.device_embeddings,
+            "g_w1": self.g_w1,
+            "g_b1": self.g_b1,
+            "g_w2": self.g_w2,
+            "g_b2": self.g_b2,
+            "num_devices": np.array([self.num_devices], dtype=np.int32),
+            "embed_dim": np.array([self.embed_dim], dtype=np.int32),
+            "hidden": np.array([self.hidden], dtype=np.int32),
+            "use_temperature": np.array([int(self.use_temperature)], dtype=np.int32),
+        }
+        if self.use_temperature:
+            state["t_w"] = self.t_w
+            state["t_b"] = self.t_b
+        return state
+
+    def load_state_dict(self, state: Dict[str, np.ndarray]):
+        self.device_embeddings[...] = state["device_embeddings"]
+        self.g_w1[...] = state["g_w1"]
+        self.g_b1[...] = state["g_b1"]
+        self.g_w2[...] = state["g_w2"]
+        self.g_b2[...] = state["g_b2"]
+        if self.use_temperature:
+            self.t_w[...] = state["t_w"]
+            self.t_b[...] = state["t_b"]
 
     def fuse(self, expert_outputs: List[Dict[str, Any]], device_id: int) -> Dict[str, Any]:
-        # reorganize logits per expert and ensure same class dim
         expert_map = {e["expert"]: np.array(e["logits"], dtype=float) for e in expert_outputs}
-        K = len(self.expert_names)
-        # build matrix K x C
         mats = []
         for name in self.expert_names:
             mats.append(expert_map.get(name, np.zeros_like(next(iter(expert_map.values())))))
-        mats = np.vstack(mats)  # K x C
-
-        embed = self._device_embed(device_id)
-        pi = self._mlp_gating(embed)  # K
-        if self.use_temperature:
-            T = self._mlp_temperature(embed)  # K
-        else:
-            T = np.ones(K)
-
-        # apply temperature and softmax per expert
-        probs = []
-        for k in range(K):
-            logits = mats[k] / T[k]
-            ex = np.exp(logits - logits.max())
-            probs.append(ex / ex.sum())
-        probs = np.vstack(probs)  # K x C
-
-        # weighted sum
-        final = (pi[:, None] * probs).sum(axis=0)
-        return {"device_id": int(device_id), "pi": pi.tolist(), "probs": final.tolist()}
+        mats = np.vstack(mats)
+        fused_logits, _ = self._forward_single(mats, int(device_id))
+        probs = _softmax(fused_logits)
+        return {"device_id": int(device_id), "probs": probs.tolist()}
 

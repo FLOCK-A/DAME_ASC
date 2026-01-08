@@ -1,17 +1,12 @@
-"""Minimal placeholder training script for Stage-2 (device-specific fine-tuning).
-
-This implements Option A: freeze experts and fine-tune fusion (placeholder).
-"""
+"""Stage-2 device-specific fine-tuning with numpy-based training loop."""
 import argparse
-import json
 import os
 from pathlib import Path
 
-import numpy as np
-
 from dame_asc.config import load_config
 from dame_asc.data.loader import DataLoader
-from dame_asc.models.factory import build_expert, build_fusion
+from dame_asc.optim.adamw import AdamW
+from src.train.train_utils import build_modules, load_checkpoint, save_checkpoint, train_one_epoch
 
 
 def parse_args():
@@ -35,32 +30,59 @@ def main():
     loader = DataLoader(manifest)
     samples = loader.generate_synthetic(4) if (not manifest) else loader.load_manifest()
 
-    # Build experts (and freeze them conceptually)
-    expert_cfgs = cfg.get("model", {}).get("experts", [{"name": "passt"}, {"name": "cnn"}])
-    experts = []
-    for e in expert_cfgs:
-        name = e.get("name") if isinstance(e, dict) else e
-        experts.append(build_expert(name, e if isinstance(e, dict) else {}))
+    experts, fusion, dcdir = build_modules(cfg)
+    if args.init_ckpt:
+        load_checkpoint(args.init_ckpt, experts, fusion, dcdir)
 
-    # Build fusion
-    fusion_cfg = cfg.get("model", {}).get("fusion", {"name": "dcf"})
-    fusion = build_fusion(fusion_cfg.get("name", "dcf"), fusion_cfg)
+    train_cfg = cfg.get("train", {}) or {}
+    batch_size = int(train_cfg.get("batch_size", 32))
+    lr = float(train_cfg.get("lr", 3e-4))
+    weight_decay = float(train_cfg.get("weight_decay", 0.0))
+    freeze_cfg = train_cfg.get("freeze", {}) or {}
+    freeze_experts = bool(freeze_cfg.get("experts", True))
+    freeze_fusion = bool(freeze_cfg.get("fusion", False))
+    optimizer = AdamW([], lr=lr, weight_decay=weight_decay)
 
-    # Placeholder fine-tune loop: just evaluate fusion on existing experts
-    results = []
-    for s in samples:
-        expert_outputs = [ex.predict(s) for ex in experts]
-        device = int(s.get("device", -1) or -1)
-        fused = fusion.fuse(expert_outputs, device)
-        # compute ce against ground truth using fused probs
-        probs = np.array(fused["probs"])
-        pred = int(np.argmax(probs))
-        results.append({"id": s.get("id"), "device": device, "pred": pred, "probs": fused["probs"]})
+    def train_for_device(device_id: int, subset: list, out_dir: str):
+        best_loss = float("inf")
+        epochs = int(train_cfg.get("epochs", 1))
+        for ep in range(1, epochs + 1):
+            metrics = train_one_epoch(
+                subset,
+                cfg,
+                experts,
+                fusion,
+                dcdir,
+                optimizer,
+                batch_size,
+                freeze_experts=freeze_experts,
+                freeze_fusion=freeze_fusion,
+            )
+            print(f"[device {device_id}] Epoch {ep}/{epochs} metrics: {metrics}")
+            if metrics["loss"] < best_loss:
+                meta = {"epoch": ep, "metrics": metrics, "stage": "device_specific", "device_id": device_id}
+                save_checkpoint(os.path.join(out_dir, "best.ckpt"), experts, fusion, dcdir, meta)
+                best_loss = metrics["loss"]
 
     Path(workdir).mkdir(parents=True, exist_ok=True)
-    with open(os.path.join(workdir, "stage2_results.json"), "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
-    print(f"Stage2 results written to {workdir}/stage2_results.json")
+    if args.all_devices:
+        device_ids = sorted({int(s.get("device", -1) or -1) for s in samples if int(s.get("device", -1) or -1) >= 0})
+        for device_id in device_ids:
+            if args.init_ckpt:
+                load_checkpoint(args.init_ckpt, experts, fusion, dcdir)
+            subset = [s for s in samples if int(s.get("device", -1) or -1) == device_id]
+            if not subset:
+                continue
+            device_dir = os.path.join(workdir, f"device_{device_id}")
+            Path(device_dir).mkdir(parents=True, exist_ok=True)
+            train_for_device(device_id, subset, device_dir)
+    else:
+        device_id = int(args.device_id) if args.device_id is not None else -1
+        if device_id >= 0:
+            subset = [s for s in samples if int(s.get("device", -1) or -1) == device_id]
+        else:
+            subset = samples
+        train_for_device(device_id, subset, workdir)
 
 
 if __name__ == "__main__":

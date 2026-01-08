@@ -6,15 +6,15 @@ from dame_asc.model.base import BaseModel
 from .common import NumpyMLPExpert
 
 
-class CnnExpert(BaseModel):
-    """Lightweight CNN-style expert with a compact MLP head."""
+class BeatsExpert(BaseModel):
+    """Lightweight BEATs-style expert with a deeper MLP stack."""
 
     def __init__(self, config: Dict[str, Any] | None = None):
         super().__init__(config)
         cfg = self.config.copy()
-        cfg.setdefault("hidden_dims", [256, 128])
-        self.model = NumpyMLPExpert("cnn", cfg)
-        self.name = "cnn"
+        cfg.setdefault("hidden_dims", [768, 384, 192])
+        self.model = NumpyMLPExpert("beats", cfg)
+        self.name = "beats"
 
     def forward(self, features: np.ndarray):
         return self.model.forward(features)
@@ -40,6 +40,6 @@ class CnnExpert(BaseModel):
     def predict(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         features = sample.get("features")
         if features is None:
-            raise ValueError("features missing in sample for CnnExpert.predict")
+            raise ValueError("features missing in sample for BeatsExpert.predict")
         logits, _ = self.forward(np.asarray(features)[None, :])
         return {"id": sample.get("id"), "logits": logits[0].tolist(), "expert": self.name}
