@@ -20,6 +20,7 @@ class MelEQBank:
         smooth_kernel: int = 9,
         embed_dim: int = 16,
         num_devices: int = 16,
+        unknown_index: int | None = None,
         seed: int = 0,
     ):
         self.bank_size = int(bank_size)
@@ -28,6 +29,10 @@ class MelEQBank:
         self.smooth_kernel = int(smooth_kernel)
         self.embed_dim = int(embed_dim)
         self.num_devices = int(num_devices)
+        if unknown_index is None:
+            self.unknown_index = max(0, self.num_devices - 1)
+        else:
+            self.unknown_index = int(unknown_index)
         rng = np.random.RandomState(seed)
         base = rng.randn(self.bank_size, self.n_mels) * (self.max_db / 2.0)
         self.prototypes = np.array([self._smooth_row(r) for r in base]).astype(np.float32)
@@ -48,7 +53,11 @@ class MelEQBank:
         return sm[: self.n_mels]
 
     def _device_index(self, device_id: int) -> int:
-        return int(device_id) % self.num_devices
+        if device_id is None or int(device_id) < 0:
+            return self.unknown_index
+        if int(device_id) >= self.num_devices:
+            return self.unknown_index
+        return int(device_id)
 
     def style_for_device(self, device_id: int) -> np.ndarray:
         idx = self._device_index(device_id)
