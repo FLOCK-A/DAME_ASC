@@ -102,14 +102,16 @@ class DCFusion:
             dlog = dlogits[i]
             d_fused = dlog / np.clip(fused_probs, 1e-12, 1.0)
             d_pi = np.array([np.sum(d_fused * expert_probs[k]) for k in range(num_experts)])
+            d_z_list = []
             for k in range(num_experts):
                 d_probs = pi[k] * d_fused
                 d_z = expert_probs[k] * (d_probs - np.sum(d_probs * expert_probs[k]))
+                d_z_list.append(d_z)
                 grad_expert_logits[k, i, :] = d_z / T[k]
             if self.use_temperature:
                 d_T = np.array(
                     [
-                        -np.sum((pi[k] * d_fused) * (expert_logits[k] / (T[k] ** 2)))
+                        -np.sum(d_z_list[k] * (expert_logits[k] / (T[k] ** 2)))
                         for k in range(num_experts)
                     ]
                 )
