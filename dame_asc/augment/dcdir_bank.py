@@ -2,6 +2,7 @@ from typing import Dict, Sequence, Tuple
 
 import numpy as np
 
+from dame_asc.utils import map_device_index
 
 def _softmax(x: np.ndarray) -> np.ndarray:
     x = x - np.max(x)
@@ -53,11 +54,7 @@ class MelEQBank:
         return sm[: self.n_mels]
 
     def _device_index(self, device_id: int) -> int:
-        if device_id is None or int(device_id) < 0:
-            return self.unknown_index
-        if int(device_id) >= self.num_devices:
-            return self.unknown_index
-        return int(device_id)
+        return map_device_index(device_id, self.num_devices, self.unknown_index)
 
     def style_for_device(self, device_id: int) -> np.ndarray:
         idx = self._device_index(device_id)
