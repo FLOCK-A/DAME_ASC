@@ -33,7 +33,8 @@ def compute_table(manifest_path: str, expert_cfgs: list):
     table = {ename: {} for ename in expert_names}
 
     for s in samples:
-        device = int(s.get("device", -1) or -1)
+        device_raw = s.get("device", -1)
+        device = -1 if device_raw is None else int(device_raw)
         true = s.get("scene")
         for e in expert_cfgs:
             name = e.get("name") if isinstance(e, dict) else e

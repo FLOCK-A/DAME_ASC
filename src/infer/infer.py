@@ -59,13 +59,18 @@ def find_device_ckpt(device_ckpt_dir: str, device_id: int) -> str | None:
     return None
 
 
+def get_device_id(sample: Dict[str, Any]) -> int:
+    device_raw = sample.get("device", -1)
+    return -1 if device_raw is None else int(device_raw)
+
+
 def infer_one_sample(sample: Dict[str, Any], experts, fusion, tta_cfg: Dict[str, Any]) -> Dict[str, Any]:
     n_crops = int(tta_cfg.get("num_crops", 1)) if tta_cfg.get("enable", False) else 1
     probs_accum = None
     for c in range(n_crops):
         expert_outputs = [ex.predict(sample) for ex in experts]
         if fusion is not None:
-            fused = fusion.fuse(expert_outputs, int(sample.get("device", -1) or -1))
+            fused = fusion.fuse(expert_outputs, get_device_id(sample))
             probs = np.array(fused["probs"])
         else:
             # average softmax of logits
@@ -77,7 +82,7 @@ def infer_one_sample(sample: Dict[str, Any], experts, fusion, tta_cfg: Dict[str,
             probs_accum = probs_accum + probs
     probs_final = probs_accum / float(n_crops)
     pred = int(np.argmax(probs_final))
-    return {"id": sample.get("id"), "path": sample.get("path"), "device": int(sample.get("device", -1) or -1), "pred": pred, "probs": probs_final.tolist()}
+    return {"id": sample.get("id"), "path": sample.get("path"), "device": get_device_id(sample), "pred": pred, "probs": probs_final.tolist()}
 
 
 def main():
@@ -114,7 +119,7 @@ def main():
         writer = csv.writer(csvf)
         writer.writerow(header)
         for s in samples:
-            device = int(s.get("device", -1) or -1)
+            device = get_device_id(s)
             device_ckpt = find_device_ckpt(args.device_ckpt_dir, device) if device >= 0 else None
             used_ckpt = device_ckpt if device_ckpt else args.general_ckpt
 
