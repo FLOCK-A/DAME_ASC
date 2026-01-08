@@ -1,6 +1,11 @@
 import json
 import logging
-from typing import Any
+from typing import Any, Dict, Optional
+
+import numpy as np
+from pathlib import Path
+
+from .augment.dcdir_bank import MelEQBank
 
 
 def get_logger(name: str):
@@ -17,4 +22,48 @@ def get_logger(name: str):
 def write_json(path: str, obj: Any):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def load_feature(
+    sample: Dict[str, Any],
+    input_cfg: Optional[Dict[str, Any]] = None,
+    dcdir_bank: Optional[MelEQBank] = None,
+) -> np.ndarray:
+    """Load or synthesize feature vector for a sample.
+
+    Supports:
+      - sample["feature"] or sample["features"] already populated
+      - .npy file on disk
+      - fallback to zeros with configured n_mels/n_frames
+    """
+    input_cfg = input_cfg or {}
+    n_mels = int(input_cfg.get("n_mels", 128))
+    n_frames = int(input_cfg.get("n_frames", 10))
+
+    feat = sample.get("feature")
+    if feat is None:
+        feat = sample.get("features")
+
+    if feat is None:
+        path = sample.get("path")
+        if path:
+            p = Path(str(path))
+            if p.exists() and p.suffix.lower() == ".npy":
+                feat = np.load(str(p))
+
+    if feat is None:
+        feat = np.zeros((n_frames, n_mels), dtype=float)
+
+    feat = np.asarray(feat, dtype=float)
+
+    if feat.ndim == 2 and dcdir_bank is not None:
+        device_id = sample.get("device", -1)
+        device = -1 if device_id is None else int(device_id)
+        feat = dcdir_bank.apply_to_mel(feat, device)
+
+    if feat.ndim == 2:
+        # average over time frames
+        feat = feat.mean(axis=0)
+
+    return feat.astype(float)
 
