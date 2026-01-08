@@ -251,8 +251,14 @@ def train_one_epoch(
             fusion.add_gate_entropy_grad(fusion_caches, gate_entropy_weight / float(len(fusion_caches)))
         if dcdir is not None and dcdir_l2_weight > 0.0:
             loss += dcdir_l2_weight * float(np.mean(dcdir.prototypes ** 2))
-            numel = float(dcdir.prototypes.size)
-            dcdir.grad_prototypes += (2.0 * dcdir_l2_weight / max(1.0, numel)) * dcdir.prototypes
+            loss += dcdir_l2_weight * float(np.mean(dcdir.proj_w ** 2))
+            loss += dcdir_l2_weight * float(np.mean(dcdir.proj_b ** 2))
+            proto_numel = float(dcdir.prototypes.size)
+            proj_w_numel = float(dcdir.proj_w.size)
+            proj_b_numel = float(dcdir.proj_b.size)
+            dcdir.grad_prototypes += (2.0 * dcdir_l2_weight / max(1.0, proto_numel)) * dcdir.prototypes
+            dcdir.grad_proj_w += (2.0 * dcdir_l2_weight / max(1.0, proj_w_numel)) * dcdir.proj_w
+            dcdir.grad_proj_b += (2.0 * dcdir_l2_weight / max(1.0, proj_b_numel)) * dcdir.proj_b
         if fusion is not None:
             grad_expert_logits = fusion.backward(dlogits, fusion_caches)
         else:
