@@ -178,8 +178,12 @@ def train_one_epoch(
     num_classes = int(cfg.get("model", {}).get("num_classes", 3))
     loss_cfg = cfg.get("loss", {}) or {}
     ce_cfg = loss_cfg.get("ce", {}) or {}
+    cons_cfg = loss_cfg.get("consistency", {}) or {}
     reg_cfg = loss_cfg.get("reg", {}) or {}
     label_smoothing = float(ce_cfg.get("label_smoothing", 0.0))
+    cons_enable = bool(cons_cfg.get("enable", False))
+    cons_weight = float(cons_cfg.get("weight", 0.0))
+    cons_type = cons_cfg.get("type", "mse")
     gate_entropy_weight = float(reg_cfg.get("gate_entropy_weight", 0.0))
     dcdir_l2_weight = float(reg_cfg.get("dcdir_l2_weight", 0.0))
 
@@ -198,7 +202,10 @@ def train_one_epoch(
             expert_logits.append(logits)
             expert_caches.append(cache)
         expert_logits = np.stack(expert_logits, axis=0)
-        device_ids = np.array([int(s.get("device", -1) or -1) for s in batch], dtype=np.int32)
+        device_ids = np.array(
+            [-1 if s.get("device", -1) is None else int(s.get("device", -1)) for s in batch],
+            dtype=np.int32,
+        )
         if fusion is not None:
             fused_logits, fusion_caches = fusion.forward(expert_logits, device_ids)
         else:
@@ -207,6 +214,33 @@ def train_one_epoch(
         targets = get_targets(batch, num_classes)
         ce_loss, dlogits = cross_entropy_loss(fused_logits, targets, label_smoothing=label_smoothing)
         loss = ce_loss
+        if cons_enable and cons_weight > 0.0:
+            aug_features, _, _ = prepare_features(
+                batch,
+                cfg,
+                dcdir,
+                training=True,
+                rng=np.random.RandomState(1 + num_batches),
+            )
+            aug_expert_logits = []
+            for expert in experts:
+                aug_logits, _ = expert.forward(aug_features)
+                aug_expert_logits.append(aug_logits)
+            aug_expert_logits = np.stack(aug_expert_logits, axis=0)
+            if fusion is not None:
+                aug_fused_logits, _ = fusion.forward(aug_expert_logits, device_ids)
+            else:
+                aug_fused_logits = aug_expert_logits.mean(axis=0)
+            if cons_type == "kl":
+                p = softmax(fused_logits)
+                q = softmax(aug_fused_logits)
+                cons = float(np.mean(p * (np.log(np.clip(p, 1e-12, 1.0)) - np.log(np.clip(q, 1e-12, 1.0)))))
+                dlogits += cons_weight * (p - q) / float(len(batch))
+            else:
+                diff = fused_logits - aug_fused_logits
+                cons = float(np.mean(diff ** 2))
+                dlogits += cons_weight * (2.0 * diff) / float(len(batch))
+            loss += cons_weight * cons
         if fusion is not None and gate_entropy_weight > 0.0:
             entropies = []
             for cache in fusion_caches:

@@ -60,7 +60,9 @@ def infer_one_sample(
             expert_logits.append(logits[0])
         expert_logits = np.stack(expert_logits, axis=0)[:, None, :]
         if fusion is not None:
-            fused_logits, _ = fusion.forward(expert_logits, np.array([int(sample.get("device", -1) or -1)]))
+            device_raw = sample.get("device", -1)
+            device = -1 if device_raw is None else int(device_raw)
+            fused_logits, _ = fusion.forward(expert_logits, np.array([device]))
             probs = softmax(fused_logits)[0]
         else:
             probs = softmax(expert_logits.mean(axis=0))[0]
@@ -73,7 +75,7 @@ def infer_one_sample(
     return {
         "id": sample.get("id"),
         "path": sample.get("path"),
-        "device": int(sample.get("device", -1) or -1),
+        "device": -1 if sample.get("device", -1) is None else int(sample.get("device", -1)),
         "pred": pred,
         "probs": probs_final.tolist(),
     }
@@ -115,7 +117,7 @@ def main():
         writer = csv.writer(csvf)
         writer.writerow(header)
         for s in samples:
-            device = int(s.get("device", -1) or -1)
+            device = -1 if s.get("device", -1) is None else int(s.get("device", -1))
             device_ckpt = find_device_ckpt(args.device_ckpt_dir, device) if device >= 0 else None
             used_ckpt = device_ckpt if device_ckpt else args.general_ckpt
             if device_ckpt:
