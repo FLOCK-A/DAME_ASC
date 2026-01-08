@@ -190,6 +190,8 @@ def train_one_epoch(
 
     total_loss = 0.0
     num_batches = 0
+    gate_stats: Dict[int, Dict[str, Any]] = {}
+    dcdir_stats: Dict[int, Dict[str, Any]] = {}
     for start in range(0, len(samples), batch_size):
         batch = samples[start:start + batch_size]
         if not batch:
@@ -212,6 +214,23 @@ def train_one_epoch(
         else:
             fused_logits = expert_logits.mean(axis=0)
             fusion_caches = []
+        if fusion is not None:
+            for i, cache in enumerate(fusion_caches):
+                device = int(device_ids[i])
+                pi = np.asarray(cache["pi"], dtype=np.float32)
+                entry = gate_stats.setdefault(device, {"pi_sum": np.zeros_like(pi), "entropy_sum": 0.0, "count": 0})
+                entry["pi_sum"] += pi
+                entry["entropy_sum"] += float(-np.sum(pi * np.log(np.clip(pi, 1e-12, 1.0))))
+                entry["count"] += 1
+        if dcdir is not None:
+            for i, cache in enumerate(dcdir_caches):
+                if cache is None:
+                    continue
+                device = int(device_ids[i])
+                style = np.asarray(cache["style"], dtype=np.float32)
+                entry = dcdir_stats.setdefault(device, {"style_sum": np.zeros_like(style), "count": 0})
+                entry["style_sum"] += style
+                entry["count"] += 1
         targets = get_targets(batch, num_classes)
         ce_loss, dlogits = cross_entropy_loss(fused_logits, targets, label_smoothing=label_smoothing)
         loss = ce_loss
@@ -284,4 +303,24 @@ def train_one_epoch(
         optimizer.step(grads)
         total_loss += loss
         num_batches += 1
-    return {"loss": total_loss / max(1, num_batches)}
+    metrics: Dict[str, Any] = {"loss": total_loss / max(1, num_batches)}
+    if gate_stats:
+        gate_pi_by_device = {
+            device: (entry["pi_sum"] / float(entry["count"])).tolist() for device, entry in gate_stats.items()
+        }
+        gate_entropy_by_device = {
+            device: float(entry["entropy_sum"] / float(entry["count"])) for device, entry in gate_stats.items()
+        }
+        metrics["gate_entropy_mean"] = float(
+            np.mean(list(gate_entropy_by_device.values())) if gate_entropy_by_device else 0.0
+        )
+        metrics["gate_stats"] = {
+            "pi_by_device": gate_pi_by_device,
+            "entropy_by_device": gate_entropy_by_device,
+        }
+    if dcdir_stats:
+        dcdir_eq_by_device = {
+            device: (entry["style_sum"] / float(entry["count"])).tolist() for device, entry in dcdir_stats.items()
+        }
+        metrics["dcdir_eq"] = {"eq_by_device": dcdir_eq_by_device}
+    return metrics

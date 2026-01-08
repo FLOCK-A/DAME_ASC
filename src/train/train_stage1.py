@@ -7,6 +7,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Dict, Any
@@ -63,6 +64,17 @@ def main():
             freeze_fusion=freeze_fusion,
             freeze_dcdir=freeze_dcdir,
         )
+        gate_stats = metrics.pop("gate_stats", None)
+        dcdir_eq = metrics.pop("dcdir_eq", None)
+        Path(workdir).mkdir(parents=True, exist_ok=True)
+        if gate_stats:
+            gate_path = os.path.join(workdir, f"gating_stats_epoch_{ep}.json")
+            with open(gate_path, "w", encoding="utf-8") as f:
+                json.dump(gate_stats, f, ensure_ascii=False, indent=2)
+        if dcdir_eq:
+            eq_path = os.path.join(workdir, f"dcdir_eq_epoch_{ep}.json")
+            with open(eq_path, "w", encoding="utf-8") as f:
+                json.dump(dcdir_eq, f, ensure_ascii=False, indent=2)
         print(f"Epoch {ep}/{epochs} metrics: {metrics}")
         if metrics["loss"] < best_loss:
             meta = {"epoch": ep, "metrics": metrics, "stage": "general"}
