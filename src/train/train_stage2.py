@@ -56,6 +56,7 @@ def main():
                 dcdir,
                 optimizer,
                 batch_size,
+                epoch=ep,
                 freeze_experts=freeze_experts,
                 freeze_fusion=freeze_fusion,
                 freeze_dcdir=freeze_dcdir,

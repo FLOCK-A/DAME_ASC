@@ -171,11 +171,28 @@ def train_one_epoch(
     dcdir: Optional[Any],
     optimizer: AdamW,
     batch_size: int,
+    epoch: int,
     freeze_experts: bool = False,
     freeze_fusion: bool = False,
     freeze_dcdir: bool = False,
 ):
-    rng = np.random.RandomState(0)
+    def _override_dcdir_config(
+        base_cfg: Dict[str, Any],
+        *,
+        enable: Optional[bool] = None,
+        p_apply: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        new_cfg = dict(base_cfg)
+        augment_cfg = dict(base_cfg.get("augment", {}) or {})
+        dcdir_cfg = dict(augment_cfg.get("dcdir", {}) or {})
+        if enable is not None:
+            dcdir_cfg["enable"] = enable
+        if p_apply is not None:
+            dcdir_cfg["p"] = p_apply
+        augment_cfg["dcdir"] = dcdir_cfg
+        new_cfg["augment"] = augment_cfg
+        return new_cfg
+
     num_classes = int(cfg.get("model", {}).get("num_classes", 3))
     loss_cfg = cfg.get("loss", {}) or {}
     ce_cfg = loss_cfg.get("ce", {}) or {}
@@ -184,9 +201,27 @@ def train_one_epoch(
     label_smoothing = float(ce_cfg.get("label_smoothing", 0.0))
     cons_enable = bool(cons_cfg.get("enable", False))
     cons_weight = float(cons_cfg.get("weight", 0.0))
+    warmup_epochs = int(cons_cfg.get("warmup_epochs", 0))
+    total_epochs = int(cfg.get("train", {}).get("epochs", warmup_epochs + 1))
+    ramp_epochs = max(1, total_epochs - warmup_epochs)
+    if epoch <= warmup_epochs:
+        effective_cons_weight = 0.0
+    else:
+        progress = min(1.0, float(epoch - warmup_epochs) / float(ramp_epochs))
+        effective_cons_weight = cons_weight * progress
     cons_type = cons_cfg.get("type", "mse")
     gate_entropy_weight = float(reg_cfg.get("gate_entropy_weight", 0.0))
     dcdir_l2_weight = float(reg_cfg.get("dcdir_l2_weight", 0.0))
+    augment_cfg = cfg.get("augment", {}) or {}
+    dcdir_cfg = augment_cfg.get("dcdir", {}) if isinstance(augment_cfg, dict) else {}
+    view1_dcdir_p = float(cons_cfg.get("view1_dcdir_p", 0.0))
+    view2_dcdir_p = float(cons_cfg.get("view2_dcdir_p", 1.0))
+    base_dcdir_enable = bool(dcdir_cfg.get("enable", False))
+    view1_enable = base_dcdir_enable and view1_dcdir_p > 0.0
+    view1_cfg = _override_dcdir_config(cfg, enable=view1_enable, p_apply=view1_dcdir_p)
+    view2_enable = base_dcdir_enable or bool(cons_cfg.get("view2_force_dcdir", True))
+    view2_cfg = _override_dcdir_config(cfg, enable=view2_enable, p_apply=view2_dcdir_p)
+    base_seed = int(cons_cfg.get("seed", 0))
 
     total_loss = 0.0
     num_batches = 0
@@ -195,7 +230,14 @@ def train_one_epoch(
         if not batch:
             continue
         zero_grad([*experts, fusion, dcdir])
-        features, dcdir_caches, dcdir_applied = prepare_features(batch, cfg, dcdir, training=True, rng=rng)
+        view1_rng = np.random.RandomState(base_seed + num_batches)
+        features, dcdir_caches, dcdir_applied = prepare_features(
+            batch,
+            view1_cfg,
+            dcdir,
+            training=True,
+            rng=view1_rng,
+        )
         expert_logits = []
         expert_caches = []
         for expert in experts:
@@ -215,13 +257,13 @@ def train_one_epoch(
         targets = get_targets(batch, num_classes)
         ce_loss, dlogits = cross_entropy_loss(fused_logits, targets, label_smoothing=label_smoothing)
         loss = ce_loss
-        if cons_enable and cons_weight > 0.0:
+        if cons_enable and effective_cons_weight > 0.0:
             aug_features, _, _ = prepare_features(
                 batch,
-                cfg,
+                view2_cfg,
                 dcdir,
                 training=True,
-                rng=np.random.RandomState(1 + num_batches),
+                rng=np.random.RandomState(base_seed + 1 + num_batches),
             )
             aug_expert_logits = []
             for expert in experts:
@@ -236,12 +278,12 @@ def train_one_epoch(
                 p = softmax(fused_logits)
                 q = softmax(aug_fused_logits)
                 cons = float(np.mean(p * (np.log(np.clip(p, 1e-12, 1.0)) - np.log(np.clip(q, 1e-12, 1.0)))))
-                dlogits += cons_weight * (p - q) / float(len(batch))
+                dlogits += effective_cons_weight * (p - q) / float(len(batch))
             else:
                 diff = fused_logits - aug_fused_logits
                 cons = float(np.mean(diff ** 2))
-                dlogits += cons_weight * (2.0 * diff) / float(len(batch))
-            loss += cons_weight * cons
+                dlogits += effective_cons_weight * (2.0 * diff) / float(len(batch))
+            loss += effective_cons_weight * cons
         if fusion is not None and gate_entropy_weight > 0.0:
             entropies = []
             for cache in fusion_caches:
