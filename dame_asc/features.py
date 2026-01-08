@@ -20,7 +20,7 @@ def mel_to_feature(mel: np.ndarray) -> np.ndarray:
     return mel.mean(axis=0)
 
 
-def _load_mel(sample: Dict[str, Any], n_frames: int, n_mels: int, training: bool) -> np.ndarray:
+def _load_mel(sample: Dict[str, Any], n_frames: int, n_mels: int) -> np.ndarray:
     feat = sample.get("features") or sample.get("feature")
     if feat is not None:
         arr = np.asarray(feat, dtype=np.float32)
@@ -36,11 +36,6 @@ def _load_mel(sample: Dict[str, Any], n_frames: int, n_mels: int, training: bool
             if arr.ndim == 1:
                 return arr[None, :]
             return arr
-    if training:
-        raise ValueError(
-            "Training samples must include precomputed log-mel features or a .npy path. "
-            "Please extract log-mel features offline before training."
-        )
     return deterministic_mel(sample, n_frames=n_frames, n_mels=n_mels)
 
 
@@ -70,7 +65,7 @@ def prepare_features(
     dcdir_caches: List[Optional[Dict[str, Any]]] = []
     applied_flags: List[bool] = []
     for sample in samples:
-        mel = _load_mel(sample, n_frames=n_frames, n_mels=n_mels, training=training)
+        mel = _load_mel(sample, n_frames=n_frames, n_mels=n_mels)
         cache = None
         applied = False
         if dcdir_bank is not None and dcdir_enable:

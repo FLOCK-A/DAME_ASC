@@ -48,7 +48,11 @@ class DCFusion:
         self.grad_t_b = np.zeros_like(self.t_b) if self.use_temperature else None
 
     def _device_index(self, device_id: int) -> int:
-        return map_device_index(device_id, self.num_devices, self.unknown_index)
+        if device_id is None or int(device_id) < 0:
+            return self.unknown_index
+        if int(device_id) >= self.num_devices:
+            return self.unknown_index
+        return int(device_id)
 
     def _forward_single(self, expert_logits: np.ndarray, device_id: int) -> Tuple[np.ndarray, Dict[str, Any]]:
         idx = self._device_index(device_id)
@@ -99,16 +103,14 @@ class DCFusion:
             dlog = dlogits[i]
             d_fused = dlog / np.clip(fused_probs, 1e-12, 1.0)
             d_pi = np.array([np.sum(d_fused * expert_probs[k]) for k in range(num_experts)])
-            d_z_list = []
             for k in range(num_experts):
                 d_probs = pi[k] * d_fused
                 d_z = expert_probs[k] * (d_probs - np.sum(d_probs * expert_probs[k]))
-                d_z_list.append(d_z)
                 grad_expert_logits[k, i, :] = d_z / T[k]
             if self.use_temperature:
                 d_T = np.array(
                     [
-                        -np.sum(d_z_list[k] * (expert_logits[k] / (T[k] ** 2)))
+                        -np.sum((pi[k] * d_fused) * (expert_logits[k] / (T[k] ** 2)))
                         for k in range(num_experts)
                     ]
                 )

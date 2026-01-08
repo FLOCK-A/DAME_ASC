@@ -54,7 +54,11 @@ class MelEQBank:
         return sm[: self.n_mels]
 
     def _device_index(self, device_id: int) -> int:
-        return map_device_index(device_id, self.num_devices, self.unknown_index)
+        if device_id is None or int(device_id) < 0:
+            return self.unknown_index
+        if int(device_id) >= self.num_devices:
+            return self.unknown_index
+        return int(device_id)
 
     def style_for_device(self, device_id: int) -> np.ndarray:
         idx = self._device_index(device_id)
