@@ -52,8 +52,13 @@ def infer_one_sample(
 ) -> Dict[str, Any]:
     n_crops = int(tta_cfg.get("num_crops", 1)) if tta_cfg.get("enable", False) else 1
     probs_accum = None
-    rng = np.random.RandomState(0)
-    for _ in range(n_crops):
+    infer_cfg = cfg.get("infer", {}) or {}
+    base_seed = infer_cfg.get("seed", 0)
+    if base_seed is None:
+        base_seed = 0
+    base_seed = int(base_seed)
+    for crop_id in range(n_crops):
+        rng = np.random.RandomState(base_seed + crop_id)
         features, _, _ = prepare_features([sample], cfg, dcdir, training=False, rng=rng)
         expert_logits = []
         for expert in experts:
