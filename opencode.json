@@ -1,0 +1,48 @@
+{
+  "$schema": "https://opencode.ai/schemas/opencode.json",
+  "name": "DAME_ASC",
+  "description": "Device-Aware Multi-Expert Acoustic Scene Classification (ASC) system for cross-device robustness",
+  "version": "1.0.0",
+  "language": "python",
+  "entryPoints": [
+    "main.py",
+    "src/train/train_stage1.py",
+    "src/train/train_stage2.py",
+    "src/infer/infer.py"
+  ],
+  "include": [
+    "src/**/*.py",
+    "dame_asc/**/*.py",
+    "tools/**/*.py",
+    "tests/**/*.py",
+    "*.py",
+    "*.json",
+    "*.yaml",
+    "*.md"
+  ],
+  "exclude": [
+    ".git/**",
+    "__pycache__/**",
+    "*.pyc",
+    "runs/**",
+    "*.npy",
+    "*.ckpt"
+  ],
+  "commands": {
+    "install": "pip install -r requirements.txt",
+    "train_stage1": "python src/train/train_stage1.py --config config.json --train_manifest data/manifests/train.json --workdir runs/stage1_general",
+    "train_stage2": "python src/train/train_stage2.py --config config.json --train_manifest data/manifests/train.json --init_ckpt runs/stage1_general/best.ckpt --all_devices --workdir runs/stage2_all",
+    "infer": "python src/infer/infer.py --config config.json --test_manifest data/manifests/test.json --general_ckpt runs/stage1_general/best.ckpt --device_ckpt_dir runs/stage2_all --out_csv runs/preds.csv",
+    "test": "python -m pytest tests/"
+  },
+  "context": {
+    "architecture": "Multi-expert fusion with device-conditioned gating (DCF) and device-conditioned DIR bank (DCDIR)",
+    "modules": {
+      "dame_asc/models/experts": "Expert neural network implementations (PaSST, CNN, BEATs)",
+      "dame_asc/models/fusion": "Device-Conditioned Fusion (DCF) module",
+      "dame_asc/augment": "Data augmentation including DCDIR bank",
+      "src/train": "Training scripts for Stage-1 and Stage-2",
+      "src/infer": "Inference and TTA implementation"
+    }
+  }
+}
